@@ -112,6 +112,16 @@ test('非配额写入异常（隐私模式等）也被识别为 StorageWriteErro
   assert.equal(st.listItems().length, 0);
 });
 
+test('isQuotaError 只识别配额类异常，普通 Error/SecurityError 不误判', () => {
+  assert.equal(Storage.isQuotaError({ name: 'QuotaExceededError' }), true);
+  assert.equal(Storage.isQuotaError({ name: 'NS_ERROR_DOM_QUOTA_REACHED' }), true);
+  assert.equal(Storage.isQuotaError({ name: 'Error', code: 22 }), true);
+  assert.equal(Storage.isQuotaError({ name: 'Error', message: 'the quota was exceeded' }), true);
+  assert.equal(Storage.isQuotaError({ name: 'SecurityError', message: 'Storage is disabled' }), false);
+  assert.equal(Storage.isQuotaError({ name: 'TypeError' }), false);
+  assert.equal(Storage.isQuotaError(null), false);
+});
+
 test('从写满恢复后可正常写入（失败状态不污染后续操作）', () => {
   const b = gateBackend(null);
   const st = Storage.createStore(b);

@@ -87,9 +87,12 @@
     toast._t = setTimeout(function () { t.hidden = true; }, ms || 2200);
   }
 
-  // ---------- 保存失败（本地存储写满）----------
-  // 所有写操作都经 guard 包裹：存储层在写入失败时会回滚内存并抛 StorageWriteError，
-  // 这里必须明确告诉用户“没存进去”，弹层不自动消失，引导先导出备份 / 清理历史痕迹。
+  // ---------- 保存失败（容量写满 / 存储不可写）----------
+  // 所有写操作都经 guard 包裹：存储层在写入失败时会回滚内存并抛 StorageWriteError。
+  // 弹层不自动消失，并按 err.quota 区分两种情况给不同引导：
+  //   · quota=true  容量写满 → 先导出备份、清理历史痕迹；
+  //   · quota=false 存储不可写（无痕/隐私模式、被浏览器禁止）→ 先导出备份、退出无痕或换浏览器，
+  //     这种情况清理历史没有用，故不展示清理入口。
   function guard(action) {
     try {
       return { ok: true, value: action() };
@@ -127,12 +130,22 @@
   }
 
   function showStorageFull(err) {
-    var msg = $('#storageFullMsg');
-    msg.innerHTML = (err && err.quota
+    var quota = !!(err && err.quota);
+    $('#storageFullTitle').textContent = quota
+      ? '⚠️ 保存失败：本机存储空间已满'
+      : '⚠️ 保存失败：浏览器存储不可写';
+    $('#storageFullMsg').innerHTML = (quota
       ? '刚才的修改<b>没有存进浏览器</b>——本机浏览器为本网站分配的存储空间已经写满。'
-      : '刚才的修改<b>没有存进浏览器</b>——浏览器存储当前不可写（可能处于无痕模式或被系统限制）。') +
+      : '刚才的修改<b>没有存进浏览器</b>——浏览器当前不允许本网站写入本地存储' +
+        '（常见于无痕/隐私浏览窗口，或浏览器/系统设置禁止了本地存储）。') +
       '请先按下面处理后再重试，否则刷新或关闭页面后这条记录会丢失。';
-    renderStorageStats();
+    // 占用分布只在“容量写满”时有参考意义；不可写时数据大小不是问题
+    $('#storageStats').hidden = !quota;
+    if (quota) renderStorageStats();
+    // 引导步骤与清理入口按情况切换：不可写时清理历史解决不了问题
+    $('#stepsQuota').hidden = !quota;
+    $('#stepsBlocked').hidden = quota;
+    $('#btnStoragePrune').hidden = !quota;
     $('#sheetStorageFull').hidden = false;
   }
 

@@ -55,22 +55,30 @@ function check(name, cond) {
   const auditBefore = window.__store.auditEntries().length;
   check('前置：库存正常渲染', cardsBefore >= 2);
 
-  // 模拟 localStorage 配额写满。
+  // 模拟 localStorage 写入失败。
   // 注意 jsdom 的 setItem 解析自 Storage.prototype，给实例赋自有属性不能遮蔽，
-  // 因此在原型方法上包一层：业务数据键写入抛 QuotaExceededError，其它键照常。
+  // 因此在原型方法上包一层：业务数据键写入按 failMode 抛错，其它键照常。
+  //   quota   → QuotaExceededError（容量写满）
+  //   blocked → SecurityError（无痕/隐私模式、存储被禁止，且消息不含 quota）
   const proto = Object.getPrototypeOf(window.localStorage);
   const protoSet = proto.setItem;
-  let quotaFull = false;
+  let failMode = null;
   proto.setItem = function (k, v) {
-    if (quotaFull && k === 'freshkeeper:v1') {
-      const e = new Error("Failed to execute 'setItem' on 'Storage': quota exceeded.");
-      e.name = 'QuotaExceededError';
+    if (failMode && k === 'freshkeeper:v1') {
+      if (failMode === 'quota') {
+        const e = new Error("Failed to execute 'setItem' on 'Storage': quota exceeded.");
+        e.name = 'QuotaExceededError';
+        throw e;
+      }
+      const e = new Error('Failed to read or write Local Storage.');
+      e.name = 'SecurityError';
       throw e;
     }
     return protoSet.call(this, k, v);
   };
-  const makeQuotaFail = () => { quotaFull = true; };
-  const restoreStorage = () => { quotaFull = false; };
+  const makeQuotaFail = () => { failMode = 'quota'; };
+  const makeStorageBlocked = () => { failMode = 'blocked'; };
+  const restoreStorage = () => { failMode = null; };
 
   // 1. 录入食材时写满：必须出现明确的失败提示，表单不关闭、库存不增加
   makeQuotaFail();
@@ -82,11 +90,16 @@ function check(name, cond) {
 
   const fullSheet = $('#sheetStorageFull');
   check('保存失败弹层出现', fullSheet.hidden === false);
+  check('配额模式：标题为“存储空间已满”', /存储空间已满/.test($('#storageFullTitle').textContent));
+  check('配额模式：标题不出现“不可写”', !/不可写/.test($('#storageFullTitle').textContent));
   check('弹层明确告知“没有存进浏览器”', /没有存进浏览器|存储空间已满/.test(fullSheet.textContent));
-  check('弹层引导先导出备份', /导出备份/.test(fullSheet.textContent));
-  check('弹层引导清理历史记录', /清理历史痕迹/.test(fullSheet.textContent));
-  check('弹层展示数据占用分布', /操作流水/.test($('#storageStats').textContent) &&
-    /KB|B|MB/.test($('#storageStats').textContent));
+  check('弹层引导先导出备份', /导出备份/.test($('#stepsQuota').textContent));
+  check('弹层引导清理历史记录', /清理历史痕迹/.test($('#stepsQuota').textContent));
+  check('配额模式：展示容量步骤、隐藏不可写步骤',
+    $('#stepsQuota').hidden === false && $('#stepsBlocked').hidden === true);
+  check('配额模式：显示“清理历史痕迹”按钮', $('#btnStoragePrune').hidden === false);
+  check('配额模式：展示数据占用分布', $('#storageStats').hidden === false &&
+    /操作流水/.test($('#storageStats').textContent) && /KB|B|MB/.test($('#storageStats').textContent));
   check('录入表单保持打开（输入不丢）', $('#sheetForm').hidden === false);
   check('表单中刚输入的名称仍在', $('#fName').value === '草莓');
   check('库存条数未增加（失败已回滚）', window.__store.listItems().length === itemsBefore);
@@ -144,6 +157,60 @@ function check(name, cond) {
     .find(t => t.dataset.view === 'history').click();
   check('追溯视图展示清理历史痕迹记录', /清理历史痕迹/.test($('#auditList').textContent));
   check('清理记录写明删除范围且库存未删', /旧流水|库存与期限事件未删除/.test($('#auditList').textContent));
+
+  // 9. 无痕/隐私模式（非配额的存储不可写）：标题、引导、按钮必须换成另一套
+  Array.from(window.document.querySelectorAll('.tab[data-view]'))
+    .find(t => t.dataset.view === 'inventory').click();
+  const itemsBeforeBlocked = window.__store.listItems().length;
+  const auditBeforeBlocked = window.__store.auditEntries().length;
+  makeStorageBlocked();
+  $('#btnAdd').click();
+  $('#fName').value = '蓝莓';
+  fire($('#fName'), 'input');
+  $('#fPurchaseDate').value = '2026-09-14';
+  fire($('#itemForm'), 'submit');
+
+  check('不可写时保存失败弹层出现', fullSheet.hidden === false);
+  check('不可写模式：标题为“浏览器存储不可写”', /浏览器存储不可写/.test($('#storageFullTitle').textContent));
+  check('不可写模式：标题不误报“存储空间已满”', !/存储空间已满/.test($('#storageFullTitle').textContent));
+  check('不可写模式：正文提示无痕/隐私模式', /无痕|隐私/.test($('#storageFullMsg').textContent));
+  check('不可写模式：展示不可写步骤、隐藏容量步骤',
+    $('#stepsBlocked').hidden === false && $('#stepsQuota').hidden === true);
+  check('不可写模式：引导退出无痕/隐私窗口', /退出无痕|隐私/.test($('#stepsBlocked').textContent));
+  check('不可写模式：引导更换浏览器重试', /更换浏览器/.test($('#stepsBlocked').textContent));
+  check('不可写模式：明确说明无需清理历史', /无需清理历史数据|删除记录也腾不出/.test($('#stepsBlocked').textContent));
+  check('不可写模式：不出现“清理历史痕迹”按钮', $('#btnStoragePrune').hidden === true);
+  // 只统计可见内容（hidden 元素的文字仍在 textContent 里，需排除）。
+  // 不可写步骤第 3 条虽提到“清理历史痕迹对此没有帮助”，但不能出现配额模式里
+  // “点击清理 → 腾出空间”那套可执行引导。
+  const visibleText = (() => {
+    const clone = fullSheet.cloneNode(true);
+    Array.from(clone.querySelectorAll('[hidden]')).forEach(el => el.remove());
+    return clone.textContent;
+  })();
+  check('不可写模式：可见内容没有“清理历史痕迹”按钮或腾出空间引导',
+    !/清理历史痕迹/.test(visibleText) && !/通常足以腾出空间/.test(visibleText));
+  check('不可写模式：不展示数据占用分布（大小不是原因）', $('#storageStats').hidden === true);
+  check('不可写模式：仍引导先导出备份', /导出备份/.test($('#stepsBlocked').textContent));
+  check('不可写模式：表单保持打开、输入不丢',
+    $('#sheetForm').hidden === false && $('#fName').value === '蓝莓');
+  check('不可写模式：库存条数未增加（已回滚）',
+    window.__store.listItems().length === itemsBeforeBlocked);
+  check('不可写模式：追溯流水未增加（已回滚）',
+    window.__store.auditEntries().length === auditBeforeBlocked);
+
+  // 导出仍可点击（自救动作不依赖写入）
+  let blockedExportThrew = false;
+  try { $('#btnStorageExport').click(); } catch (e) { blockedExportThrew = true; }
+  check('不可写模式：导出备份按钮仍可点击', blockedExportThrew === false);
+
+  // 退出无痕/换普通窗口（存储恢复）后重试成功
+  restoreStorage();
+  $('#btnStorageClose').click();
+  fire($('#itemForm'), 'submit');
+  check('存储恢复后重试：表单关闭', $('#sheetForm').hidden === true);
+  check('存储恢复后重试：新食材入库',
+    window.__store.listItems().some(i => i.name === '蓝莓'));
 
   console.log('\n结果: ' + pass + ' 通过, ' + fail + ' 失败');
   process.exit(fail ? 1 : 0);

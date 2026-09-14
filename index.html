@@ -397,22 +397,30 @@
   </div>
 </div>
 
-<!-- ========== 存储写满/保存失败提示弹层（不自动消失） ========== -->
+<!-- ========== 存储写满/不可写导致的保存失败提示弹层（不自动消失） ========== -->
 <div class="sheet sheet-alert" id="sheetStorageFull" hidden>
   <div class="sheet-mask"></div>
   <div class="sheet-panel">
     <div class="sheet-handle"></div>
-    <h3>⚠️ 保存失败：本机存储空间已满</h3>
+    <h3 id="storageFullTitle">⚠️ 保存失败：本机存储空间已满</h3>
     <p class="hint" id="storageFullMsg">
       刚才的修改<b>没有存进浏览器</b>，请先处理后再重试，否则刷新或关闭页面后这条记录会丢失。
     </p>
     <div class="storage-stats" id="storageStats"></div>
     <p class="hint">建议按顺序处理：</p>
-    <ol class="storage-steps">
+    <!-- 情况一：容量写满（QuotaExceededError）：清理历史痕迹有意义 -->
+    <ol class="storage-steps" id="stepsQuota">
       <li><b>先导出备份</b>：把全部数据存成 JSON 文件，放到手机/电脑上，数据就安全了；</li>
       <li><b>清理历史痕迹</b>：只删除较早的操作流水与字段修改快照（库存、待购、计划、成员和期限事件都不会删），
         通常足以腾出空间；</li>
       <li>若清理后仍无法保存，请导出备份后在 ⚙️ 中「清空全部数据」，再把备份导回。</li>
+    </ol>
+    <!-- 情况二：存储不可写（无痕/隐私模式或被浏览器设置禁止）：清理历史解决不了 -->
+    <ol class="storage-steps" id="stepsBlocked" hidden>
+      <li><b>先导出备份</b>：把全部数据存成 JSON 文件放到手机/电脑上，避免当前数据丢失；</li>
+      <li><b>退出无痕（隐私）浏览窗口</b>，用普通窗口重新打开本应用后重试——多数浏览器的无痕模式会禁止或随时清空本机存储；</li>
+      <li>若普通窗口仍不行，请<b>更换浏览器</b>重试，或检查浏览器/系统设置中是否禁止了该网站的本地存储；
+        这种情况下删除记录也腾不出可写空间，<b>无需清理历史数据</b>。</li>
     </ol>
     <div class="form-actions">
       <button type="button" class="btn-ghost" id="btnStorageClose">我知道了</button>
