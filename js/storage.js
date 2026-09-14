@@ -18,6 +18,34 @@
 
   var STORE_KEY = 'freshkeeper:v1';
 
+  // ---------- 写入失败（容量写满）处理 ----------
+  // 浏览器 localStorage 配额写满时 setItem 抛 QuotaExceededError；
+  // 隐私模式/被禁用也可能抛普通异常。统一包装成 StorageWriteError，界面据此提示用户。
+  function StorageWriteError(cause, dataLen) {
+    var quota = isQuotaError(cause);
+    var e = new Error(quota
+      ? '本机浏览器存储空间已满，本次修改没有保存进去。'
+      : '本机浏览器存储当前不可写，本次修改没有保存进去。');
+    e.name = 'StorageWriteError';
+    e.quota = quota;
+    e.dataLen = dataLen || 0;
+    e.cause = cause;
+    return e;
+  }
+  StorageWriteError.is = function (e) { return !!e && e.name === 'StorageWriteError'; };
+
+  function isQuotaError(e) {
+    if (!e) return false;
+    // 各浏览器配额写满的标准/历史异常名与错误码
+    if (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+        e.code === 22 || e.code === 1014) return true;
+    // 仅在异常名不像其它已知 DOM 错误时才用消息兜底，避免把 SecurityError 误判成配额
+    if (typeof e.name !== 'string' || e.name === 'Error') {
+      return /quota|exceeded the/i.test(e.message || '');
+    }
+    return false;
+  }
+
   function nowISO() { return new Date().toISOString(); }
   function uid(prefix) {
     return (prefix || 'id') + '_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
@@ -450,12 +478,75 @@
     }
 
     var db = load();
-    // 历史脏数据经宽松迁移后回写，保证后续读取的都是规范结构
-    try { backend.setItem(STORE_KEY, JSON.stringify(db)); } catch (e) {}
+    // 上次成功落盘的数据快照
+    var lastGood = JSON.stringify(db);
+    // 历史脏数据经宽松迁移后回写，保证后续读取的都是规范结构。
+    try {
+      backend.setItem(STORE_KEY, lastGood);
+    } catch (e) {
+      if (typeof console !== 'undefined') console.warn('FreshKeeper：本地存储不可写（可能容量已满）', e);
+    }
     var auditSeq = db.audit.reduce(function (m, e) { return Math.max(m, e.seq || 0); }, 0);
 
+    // ---- 写入事务 ----
+    // 一次业务操作（如 applyPlan）内部会产生多次内存修改（多条事件+流水…）。
+    // 事务内的 persist() 只做标记、不落盘；操作成功结束后一次性写入：
+    //   · 写入成功：整笔操作原子生效；
+    //   · 写入失败（容量写满）：内存回滚到操作开始前快照并抛 StorageWriteError，
+    //     磁盘停留在操作前状态——内存/磁盘严格一致，不会“看着存上了、刷新就没了”。
+    var txDepth = 0;
+    var txCheckpoint = null;
+
+    function doWrite() {
+      var serialized = JSON.stringify(db);
+      try {
+        backend.setItem(STORE_KEY, serialized);
+      } catch (e) {
+        throw new StorageWriteError(e, serialized.length);
+      }
+      lastGood = serialized;
+    }
+
     function persist() {
-      backend.setItem(STORE_KEY, JSON.stringify(db));
+      if (txDepth > 0) return; // 事务中：由外层 tx() 在结束时统一落盘
+      doWrite();
+    }
+
+    function tx(fn) {
+      if (txDepth === 0) txCheckpoint = JSON.stringify(db);
+      txDepth++;
+      var result, failure;
+      try {
+        result = fn();
+      } catch (e) {
+        failure = e;
+      }
+      txDepth--;
+      if (failure) {
+        if (txDepth === 0) db = JSON.parse(txCheckpoint);
+        throw failure;
+      }
+      if (txDepth === 0) {
+        try {
+          doWrite();
+        } catch (e) {
+          db = JSON.parse(txCheckpoint);
+          throw e;
+        }
+      }
+      return result;
+    }
+
+    // 仅供 pruneHistory（缩小数据自救）使用：按当前内存强制落盘并更新快照。
+    function forcePersist() {
+      var serialized = JSON.stringify(db);
+      try {
+        backend.setItem(STORE_KEY, serialized);
+      } catch (e) {
+        return false;
+      }
+      lastGood = serialized;
+      return true;
     }
 
     function log(action, detail, snapshot) {
@@ -466,7 +557,7 @@
     }
 
     // ---- 食材 CRUD ----
-    function addItem(fields, source) {
+    function addItemImpl(fields, source) {
       var item = {
         id: uid('it'),
         name: fields.name || '',
@@ -495,7 +586,7 @@
 
     var TRACKED_FIELDS = ['name', 'categoryId', 'purchaseDate', 'packageType', 'location', 'note'];
 
-    function updateItem(id, patch, source) {
+    function updateItemImpl(id, patch, source) {
       var item = getItem(id);
       if (!item) throw new Error('食材不存在: ' + id);
       var changes = {};
@@ -517,7 +608,7 @@
     }
 
     // ---- 期限事件 ----
-    function addEvent(itemId, type, payload, source) {
+    function addEventImpl(itemId, type, payload, source) {
       var item = getItem(itemId);
       if (!item) throw new Error('食材不存在: ' + itemId);
       // 同一食材内单调递增的序号：同一天的多个事件（如先冷冻又解冻）据此排序
@@ -540,7 +631,7 @@
       return ev;
     }
 
-    function undoEvent(eventId) {
+    function undoEventImpl(eventId) {
       var found = null;
       db.items.forEach(function (item) {
         item.events.forEach(function (ev) {
@@ -557,7 +648,7 @@
 
     // ---- 方案应用（一次写入多个事件）----
     // meta.diet：就餐成员与“明知冲突仍继续”的食材快照（方案页饮食安全提示用）
-    function applyPlan(plan, source, meta) {
+    function applyPlanImpl(plan, source, meta) {
       var applied = [];
       (plan.eventsOnApply || []).forEach(function (e) {
         applied.push(addEvent(e.itemId, e.type, { at: e.at, reason: e.reason }, source || ('plan:' + plan.type)));
@@ -573,7 +664,7 @@
     }
 
     // ---- 删除食材（软删除：保留全部历史；audit 可恢复）----
-    function removeItem(id) {
+    function removeItemImpl(id) {
       var item = getItem(id);
       if (!item) return false;
       item.removed = true;
@@ -583,7 +674,7 @@
       return true;
     }
 
-    function restoreItem(id) {
+    function restoreItemImpl(id) {
       var item = getItem(id);
       if (!item || !item.removed) return false;
       delete item.removed;
@@ -602,7 +693,7 @@
       return db.shopping.filter(function (s) { return s.id === id; })[0] || null;
     }
 
-    function addShopping(fields, source) {
+    function addShoppingImpl(fields, source) {
       var assignee = typeof fields.assignee === 'string' ? fields.assignee.trim().slice(0, 20) : '';
       var entry = {
         id: uid('sh'),
@@ -629,7 +720,7 @@
       return entry;
     }
 
-    function updateShopping(id, patch) {
+    function updateShoppingImpl(id, patch) {
       var entry = getShopping(id);
       if (!entry) return null;
       var fieldChanges = ['name', 'categoryId', 'qty', 'note'].reduce(function (acc, k) {
@@ -671,7 +762,7 @@
     }
 
     // 认领：待认领/已认领都可由家庭成员接手（已被别人抢先认领时覆盖，以转交语义记录在案）
-    function claimShopping(id, assignee) {
+    function claimShoppingImpl(id, assignee) {
       var entry = getShopping(id);
       assignee = String(assignee || '').trim().slice(0, 20);
       if (!entry || entry.status === 'done' || !assignee) return false;
@@ -688,7 +779,7 @@
     }
 
     // 转交：必须有新负责人名字；无人认领（取消认领）走 releaseShopping
-    function transferShopping(id, assignee) {
+    function transferShoppingImpl(id, assignee) {
       var entry = getShopping(id);
       assignee = String(assignee || '').trim().slice(0, 20);
       if (!entry || entry.status === 'done' || !assignee) return false;
@@ -705,7 +796,7 @@
     }
 
     // 取消认领：回到待认领池，负责人信息随之清空
-    function releaseShopping(id) {
+    function releaseShoppingImpl(id) {
       var entry = getShopping(id);
       if (!entry || entry.status !== 'claimed') return false;
       var prev = entry.assignee || '';
@@ -719,7 +810,7 @@
 
     // 购买录入保存成功后才调用：待认领/已认领项标记已购买并关联新库存；
     // 未关联（取消录入）则状态原样保留
-    function completeShopping(id, itemId) {
+    function completeShoppingImpl(id, itemId) {
       var entry = getShopping(id);
       if (!entry || SHOP_OPEN_STATUSES.indexOf(entry.status) < 0) return false;
       entry.status = 'done';
@@ -733,7 +824,7 @@
       return true;
     }
 
-    function removeShopping(id) {
+    function removeShoppingImpl(id) {
       var before = db.shopping.length;
       var entry = getShopping(id);
       db.shopping = db.shopping.filter(function (s) { return s.id !== id; });
@@ -795,7 +886,7 @@
       })[0] || null;
     }
 
-    function addMember(fields) {
+    function addMemberImpl(fields) {
       var name = String(fields.name || '').trim().slice(0, 20);
       if (!name) throw new Error('成员姓名不能为空');
       if (findMemberByName(name)) throw new Error('已存在同名家庭成员：' + name);
@@ -815,7 +906,7 @@
       return member;
     }
 
-    function updateMember(id, patch) {
+    function updateMemberImpl(id, patch) {
       var member = getMember(id);
       if (!member) return null;
       var changes = {};
@@ -846,7 +937,7 @@
       return member;
     }
 
-    function removeMember(id) {
+    function removeMemberImpl(id) {
       var before = db.members.length;
       var member = getMember(id);
       db.members = db.members.filter(function (m) { return m.id !== id; });
@@ -883,7 +974,7 @@
       return db.mealPlans.filter(function (p) { return p.id === id; })[0] || null;
     }
 
-    function addMealPlan(fields, source) {
+    function addMealPlanImpl(fields, source) {
       var items = (Array.isArray(fields.items) ? fields.items : []).map(function (pi) {
         return { id: pi.id, name: typeof pi.name === 'string' ? pi.name : '' };
       });
@@ -933,7 +1024,7 @@
         return !e.deleted && (e.type === 'consume' || e.type === 'discard');
       });
     }
-    function completeMealPlan(id, actions, at) {
+    function completeMealPlanImpl(id, actions, at) {
       var plan = getMealPlan(id);
       if (!plan || plan.status !== 'pending') return false;
       actions = actions || {};
@@ -956,7 +1047,7 @@
       return true;
     }
 
-    function removeMealPlan(id) {
+    function removeMealPlanImpl(id) {
       var before = db.mealPlans.length;
       var plan = getMealPlan(id);
       db.mealPlans = db.mealPlans.filter(function (p) { return p.id !== id; });
@@ -1000,11 +1091,106 @@
       return db.audit.slice().sort(compareAuditDesc);
     }
 
+    // ---- 历史瘦身（容量写满时的自救；不会触碰当前库存/待购/计划/成员）----
+    // 追溯流水“永不物理删除”在小容量手机浏览器上会把单键撑爆，导致新记录存不进去。
+    // 清理规则（只删“冗余痕迹”，保留可追溯主干）：
+    //   1) audit 仅保留最近 keepAudit 条（按时间倒序）；
+    //      但仍在回收站里的食材，其 item.remove 流水保留——那是“恢复该记录”的入口；
+    //   2) 已物理删除 audit 条目里的 item.remove 快照（JSON 体积大头）同步清除；
+    //   3) 每样食材的字段修订 revisions 只留最近 keepRevisions 份（引擎不依赖修订重放）。
+    // 食材/事件/撤销标记一律不删：期限重放与“撤销归档”能力不受影响。
+    function pruneHistory(opts) {
+      opts = opts || {};
+      var keepAudit = Number.isFinite(opts.keepAudit) ? opts.keepAudit : 500;
+      var keepRevisions = Number.isFinite(opts.keepRevisions) ? opts.keepRevisions : 20;
+      var beforeBytes = JSON.stringify(db).length;
+      var removedIds = {};
+      db.items.forEach(function (it) { if (it.removed) removedIds[it.id] = true; });
+
+      var sorted = db.audit.slice().sort(compareAuditDesc);
+      var kept = [];
+      var droppedAudit = 0;
+      sorted.forEach(function (e, i) {
+        var isRestoreEntry = e.action === 'item.remove' &&
+          removedIds[e.detail && e.detail.itemId];
+        if (i < keepAudit || isRestoreEntry) {
+          // 对“超出保留窗口但因恢复入口而保留”的回收站条目，剥掉大字段快照以节省空间
+          if (i >= keepAudit && e.snapshot != null) e.snapshot = null;
+          kept.push(e);
+        } else {
+          droppedAudit++;
+        }
+      });
+      db.audit = kept;
+
+      var revisionsDropped = 0;
+      db.items.forEach(function (it) {
+        if (Array.isArray(it.revisions) && it.revisions.length > keepRevisions) {
+          revisionsDropped += it.revisions.length - keepRevisions;
+          // 最早的修订最旧，保留最近的 N 份
+          it.revisions = it.revisions.slice(it.revisions.length - keepRevisions);
+        }
+      });
+
+      // 瘦身结果必须先落盘（数据只会变小，是容量写满时的自救路径）；
+      // 若连瘦身后都写不进（设备配额近乎为 0），抛出让界面引导导出+清空
+      var afterBytes = JSON.stringify(db).length;
+      if (!forcePersist()) {
+        throw new StorageWriteError(
+          { name: 'QuotaExceededError', message: 'quota' }, afterBytes);
+      }
+      // 清理动作本身也记入追溯；这一条若恰好又撑爆配额则静默保留（清理结果已保存）
+      var logEntry = {
+        id: uid('aud'), seq: ++auditSeq, at: nowISO(), action: 'history.prune',
+        detail: {
+          keepAudit: keepAudit, keepRevisions: keepRevisions,
+          droppedAudit: droppedAudit, revisionsDropped: revisionsDropped,
+          bytesBefore: beforeBytes
+        },
+        snapshot: null
+      };
+      db.audit.push(logEntry);
+      try {
+        forcePersist();
+      } catch (e2) { /* 清理结果已在盘上，此条流水可丢失 */ }
+      return {
+        droppedAudit: droppedAudit,
+        revisionsDropped: revisionsDropped,
+        bytesBefore: beforeBytes,
+        bytesAfter: JSON.stringify(db).length,
+        bytesSaved: beforeBytes - JSON.stringify(db).length
+      };
+    }
+
+    // 估算各部分占用（UTF-16 长度，与 localStorage 配额口径接近），供界面提示
+    function storageInfo() {
+      var part = function (v) { return JSON.stringify(v == null ? null : v).length; };
+      var parts = {
+        items: part(db.items),
+        shopping: part(db.shopping),
+        mealPlans: part(db.mealPlans),
+        members: part(db.members),
+        audit: part(db.audit)
+      };
+      var total = part(db);
+      return {
+        totalBytes: total,
+        parts: parts,
+        counts: {
+          items: db.items.length,
+          shopping: db.shopping.length,
+          mealPlans: db.mealPlans.length,
+          members: db.members.length,
+          audit: db.audit.length
+        }
+      };
+    }
+
     function exportJSON() {
       return JSON.stringify(db, null, 2);
     }
 
-    function importJSON(text, merge) {
+    function importJSONImpl(text, merge) {
       // 先校验、后写入：任何结构问题都整体拒绝，现有库存不被改动
       var clean = validatePayload(text);
       if (merge) {
@@ -1050,7 +1236,7 @@
       return { items: clean.items.length, shopping: clean.shopping.length, mealPlans: clean.mealPlans.length, members: clean.members.length, audit: clean.audit.length };
     }
 
-    function seedDemo(demoItems, Engine) {
+    function seedDemoImpl(demoItems, Engine) {
       // 演示数据：购买日期相对今天，便于直接看到各种分档
       Engine = Engine || (typeof global.FreshEngine !== 'undefined' ? global.FreshEngine : null);
       var today = Engine.isoDate(Engine.todayAt());
@@ -1084,6 +1270,32 @@
       return specs.length;
     }
 
+    // ---- 对外公开的变更接口：每个操作包成一笔写入事务（失败整体回滚）----
+    function addItem(fields, source) { return tx(function () { return addItemImpl(fields, source); }); }
+    function updateItem(id, patch, source) { return tx(function () { return updateItemImpl(id, patch, source); }); }
+    function addEvent(itemId, type, payload, source) {
+      return tx(function () { return addEventImpl(itemId, type, payload, source); });
+    }
+    function undoEvent(eventId) { return tx(function () { return undoEventImpl(eventId); }); }
+    function applyPlan(plan, source, meta) { return tx(function () { return applyPlanImpl(plan, source, meta); }); }
+    function removeItem(id) { return tx(function () { return removeItemImpl(id); }); }
+    function restoreItem(id) { return tx(function () { return restoreItemImpl(id); }); }
+    function addShopping(fields, source) { return tx(function () { return addShoppingImpl(fields, source); }); }
+    function updateShopping(id, patch) { return tx(function () { return updateShoppingImpl(id, patch); }); }
+    function claimShopping(id, assignee) { return tx(function () { return claimShoppingImpl(id, assignee); }); }
+    function transferShopping(id, assignee) { return tx(function () { return transferShoppingImpl(id, assignee); }); }
+    function releaseShopping(id) { return tx(function () { return releaseShoppingImpl(id); }); }
+    function completeShopping(id, itemId) { return tx(function () { return completeShoppingImpl(id, itemId); }); }
+    function removeShopping(id) { return tx(function () { return removeShoppingImpl(id); }); }
+    function addMember(fields) { return tx(function () { return addMemberImpl(fields); }); }
+    function updateMember(id, patch) { return tx(function () { return updateMemberImpl(id, patch); }); }
+    function removeMember(id) { return tx(function () { return removeMemberImpl(id); }); }
+    function addMealPlan(fields, source) { return tx(function () { return addMealPlanImpl(fields, source); }); }
+    function completeMealPlan(id, actions, at) { return tx(function () { return completeMealPlanImpl(id, actions, at); }); }
+    function removeMealPlan(id) { return tx(function () { return removeMealPlanImpl(id); }); }
+    function importJSON(text, merge) { return tx(function () { return importJSONImpl(text, merge); }); }
+    function seedDemo(demoItems, Engine) { return tx(function () { return seedDemoImpl(demoItems, Engine); }); }
+
     return {
       addItem: addItem, getItem: getItem, updateItem: updateItem, removeItem: removeItem,
       restoreItem: restoreItem, listItems: listItems,
@@ -1097,11 +1309,15 @@
       addMember: addMember, getMember: getMember, findMemberByName: findMemberByName,
       updateMember: updateMember, removeMember: removeMember, listMembers: listMembers,
       auditEntries: auditEntries, exportJSON: exportJSON, importJSON: importJSON,
+      pruneHistory: pruneHistory, storageInfo: storageInfo,
       seedDemo: seedDemo, _key: function () { return STORE_KEY; }
     };
   }
 
-  var Storage = { createStore: createStore, uid: uid, validatePayload: validatePayload };
+  var Storage = {
+    createStore: createStore, uid: uid, validatePayload: validatePayload,
+    StorageWriteError: StorageWriteError, isQuotaError: isQuotaError
+  };
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = Storage;
   } else {

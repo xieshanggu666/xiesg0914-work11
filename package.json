@@ -4,8 +4,9 @@
   "description": "鲜知 FreshKeeper —— 面向家庭的食材保质期决策助手",
   "private": true,
   "scripts": {
-    "test": "node --test test/engine.test.js test/import.test.js test/shopping.test.js test/mealplan.test.js test/diet.test.js",
+    "test": "node --test test/engine.test.js test/import.test.js test/shopping.test.js test/mealplan.test.js test/diet.test.js test/storage-quota.test.js",
     "test:e2e": "node test/e2e.smoke.js",
+    "test:storage-full": "node test/e2e.storage-full.js",
     "start": "node -e \"const http=require('http'),fs=require('fs'),p=require('path');const t={'.html':'text/html','.js':'text/javascript','.css':'text/css'};http.createServer((q,r)=>{let f=p.join(__dirname,q.url==='/'?'index.html':q.url.split('?')[0]);fs.readFile(f,(e,d)=>{if(e){r.statusCode=404;return r.end('404')}r.setHeader('Content-Type',t[p.extname(f)]||'application/octet-stream');r.end(d)})}).listen(8080,()=>console.log('FreshKeeper: http://localhost:8080'))\""
   }
 }

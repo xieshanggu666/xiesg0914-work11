@@ -86,6 +86,79 @@
     clearTimeout(toast._t);
     toast._t = setTimeout(function () { t.hidden = true; }, ms || 2200);
   }
+
+  // ---------- 保存失败（本地存储写满）----------
+  // 所有写操作都经 guard 包裹：存储层在写入失败时会回滚内存并抛 StorageWriteError，
+  // 这里必须明确告诉用户“没存进去”，弹层不自动消失，引导先导出备份 / 清理历史痕迹。
+  function guard(action) {
+    try {
+      return { ok: true, value: action() };
+    } catch (err) {
+      if (FreshStorage.StorageWriteError && FreshStorage.StorageWriteError.is(err)) {
+        showStorageFull(err);
+        return { ok: false, error: err };
+      }
+      throw err;
+    }
+  }
+
+  function humanBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / 1024 / 1024).toFixed(2) + ' MB';
+  }
+
+  function renderStorageStats() {
+    var info = store.storageInfo();
+    var rows = [
+      ['操作流水（追溯）', info.parts.audit, info.counts.audit + ' 条'],
+      ['食材记录（含修订/事件）', info.parts.items, info.counts.items + ' 样'],
+      ['待购清单', info.parts.shopping, info.counts.shopping + ' 条'],
+      ['用餐计划', info.parts.mealPlans, info.counts.mealPlans + ' 条'],
+      ['家庭成员', info.parts.members, info.counts.members + ' 位']
+    ];
+    $('#storageStats').innerHTML =
+      '<div style="margin-bottom:4px">当前本机数据约 <b>' + humanBytes(info.totalBytes) + '</b>，占用分布：</div>' +
+      rows.map(function (r) {
+        var pct = info.totalBytes ? Math.round(r[1] / info.totalBytes * 100) : 0;
+        return '<div style="display:flex;justify-content:space-between;gap:8px;line-height:1.7">' +
+          '<span>' + r[0] + '（' + r[2] + '）</span><span>' + humanBytes(r[1]) + ' · ' + pct + '%</span></div>';
+      }).join('');
+  }
+
+  function showStorageFull(err) {
+    var msg = $('#storageFullMsg');
+    msg.innerHTML = (err && err.quota
+      ? '刚才的修改<b>没有存进浏览器</b>——本机浏览器为本网站分配的存储空间已经写满。'
+      : '刚才的修改<b>没有存进浏览器</b>——浏览器存储当前不可写（可能处于无痕模式或被系统限制）。') +
+      '请先按下面处理后再重试，否则刷新或关闭页面后这条记录会丢失。';
+    renderStorageStats();
+    $('#sheetStorageFull').hidden = false;
+  }
+
+  function setupStorageAlert() {
+    $('#btnStorageClose').addEventListener('click', function () {
+      $('#sheetStorageFull').hidden = true;
+      renderAll(); // 存储层已回滚内存，刷新界面避免残留“看似已保存”的假象
+    });
+    $('#btnStorageExport').addEventListener('click', function () {
+      download('freshkeeper-backup-' + todayISO() + '.json', store.exportJSON());
+      toast('已导出备份文件，请妥善保存');
+    });
+    $('#btnStoragePrune').addEventListener('click', function () {
+      var info = store.storageInfo();
+      if (!confirm('将删除较早的操作流水（保留最近 500 条）和每样食材较早的字段修改快照。\n\n' +
+        '库存、待购、用餐计划、家庭成员、期限事件与撤销记录都不会删除，食材仍可在追溯中恢复。\n\n' +
+        '建议先点「先导出备份」再清理。现在开始清理？')) return;
+      var r = guard(function () { return store.pruneHistory({ keepAudit: 500, keepRevisions: 20 }); });
+      if (!r.ok) return; // 极端情况下瘦身后仍写不进：弹层保持，继续引导导出+清空
+      var s = r.value;
+      $('#sheetStorageFull').hidden = true;
+      renderAll();
+      toast('已清理：删除 ' + s.droppedAudit + ' 条旧流水、' + s.revisionsDropped +
+        ' 份旧快照，腾出约 ' + humanBytes(Math.max(s.bytesSaved, 0)) + '。请重试刚才的操作。', 4200);
+    });
+  }
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -279,13 +352,19 @@
 
     var purchaseShopId = state.purchaseShopId;
     if (state.editingId) {
-      store.updateItem(state.editingId, fields, 'manual');
+      var r1 = guard(function () { return store.updateItem(state.editingId, fields, 'manual'); });
+      if (!r1.ok) return; // 保存失败：弹层保持打开、输入不丢，失败提示已弹出
       toast('已保存修改，旧值已记入追溯');
     } else {
-      var saved = store.addItem(fields, purchaseShopId ? ('restock:' + purchaseShopId) : 'manual');
+      var addRes = guard(function () {
+        return store.addItem(fields, purchaseShopId ? ('restock:' + purchaseShopId) : 'manual');
+      });
+      if (!addRes.ok) return;
+      var saved = addRes.value;
       // 待购购买录入：只有保存走到这里（校验通过且已入库）才完成待购项并关联新库存
       if (purchaseShopId) {
-        store.completeShopping(purchaseShopId, saved.id);
+        var doneRes = guard(function () { return store.completeShopping(purchaseShopId, saved.id); });
+        if (!doneRes.ok) return;
         toast('已录入并完成补货：' + fields.name);
       } else {
         toast('已录入：' + fields.name);
@@ -500,7 +579,10 @@
       if (btn) btn.addEventListener('click', function () {
         var spec = evMap[k];
         if (spec[0] === 'discard' && !confirm('确认丢弃该食材？此操作会记入追溯（可在记录中恢复）。')) return;
-        store.addEvent(id, spec[0], Object.assign({ at: todayISO() }, spec[1]), 'manual');
+        var r = guard(function () {
+          return store.addEvent(id, spec[0], Object.assign({ at: todayISO() }, spec[1]), 'manual');
+        });
+        if (!r.ok) return;
         toast('已记录：' + EVENT_LABELS[spec[0]]);
         closeSheet('sheetDetail');
         renderAll();
@@ -508,7 +590,9 @@
     });
     $$('#detailBody [data-undo]').forEach(function (b) {
       b.addEventListener('click', function () {
-        if (store.undoEvent(b.getAttribute('data-undo'))) {
+        var r = guard(function () { return store.undoEvent(b.getAttribute('data-undo')); });
+        if (!r.ok) return;
+        if (r.value) {
           toast('已撤销该操作，期限已重新计算');
           openDetail(id);
           renderAll();
@@ -539,7 +623,10 @@
     if (restoreBtn) restoreBtn.addEventListener('click', function () {
       // 归档恢复 = 撤销 consume/discard 事件
       var endEv = item.events.filter(function (e) { return !e.deleted && (e.type === 'consume' || e.type === 'discard'); }).pop();
-      if (endEv) { store.undoEvent(endEv.id); toast('已恢复在库'); openDetail(id); renderAll(); }
+      if (!endEv) return;
+      var r = guard(function () { return store.undoEvent(endEv.id); });
+      if (!r.ok) return;
+      toast('已恢复在库'); openDetail(id); renderAll();
     });
   }
 
@@ -641,7 +728,8 @@
       if (!ok || !ok.checked) { toast('库存里已有同名食材，请勾选确认仍要购买'); return; }
     }
     if (state.editingShopId) {
-      store.updateShopping(state.editingShopId, fields);
+      var r1 = guard(function () { return store.updateShopping(state.editingShopId, fields); });
+      if (!r1.ok) return;
       toast('已更新待购项');
     } else {
       var preset = state.shopFormPreset || {};
@@ -649,7 +737,8 @@
         sourceItemId: preset.sourceItemId || '',
         sourceName: preset.sourceName || ''
       });
-      store.addShopping(payload, state.shopFormSource || 'manual');
+      var r2 = guard(function () { return store.addShopping(payload, state.shopFormSource || 'manual'); });
+      if (!r2.ok) return;
       toast(fields.assignee ? '已加入待购，负责人：' + fields.assignee : '已加入待购（待认领）');
     }
     state.editingShopId = null;
@@ -776,7 +865,9 @@
         var s = store.getShopping(id);
         if (!s) return;
         if (!confirm('取消认领「' + s.name + '」？它会回到待认领列表。')) return;
-        if (store.releaseShopping(id)) {
+        var relRes = guard(function () { return store.releaseShopping(id); });
+        if (!relRes.ok) return;
+        if (relRes.value) {
           toast('已取消认领：' + s.name);
           renderAll();
         }
@@ -793,7 +884,8 @@
         var s = store.getShopping(b.getAttribute('data-del-shop'));
         if (!s) return;
         if (!confirm('删除待购项「' + s.name + '」？')) return;
-        store.removeShopping(s.id);
+        var delRes = guard(function () { return store.removeShopping(s.id); });
+        if (!delRes.ok) return;
         toast('已删除待购项');
         renderAll();
       });
@@ -868,11 +960,18 @@
       var s = ctx.shoppingId ? store.getShopping(ctx.shoppingId) : null;
       if (!s) { closeSheet('sheetAssign'); state.assignCtx = null; renderAll(); return; }
       var ok;
+      var claimRes = guard(function () {
+        if (ctx.mode === 'transfer') {
+          ok = store.transferShopping(ctx.shoppingId, name);
+        } else {
+          ok = store.claimShopping(ctx.shoppingId, name);
+        }
+        return ok;
+      });
+      if (!claimRes.ok) return;
       if (ctx.mode === 'transfer') {
-        ok = store.transferShopping(ctx.shoppingId, name);
         toast(ok ? '已转交给 ' + name : '无需转交（负责人未变化或已购买）');
       } else {
-        ok = store.claimShopping(ctx.shoppingId, name);
         toast(ok ? '已认领：' + s.name + '（负责人 ' + name + '）' : '认领失败（可能已被购买）');
       }
       // 认领/转交时若本机还没有身份，顺手记住，下次一键认领
@@ -1214,10 +1313,13 @@
           var verb = finalPlan.type === 'discard' ? '确认丢弃以上食材？' : '确认已做熟并记录？';
           if (!confirm('「' + finalPlan.title + '」\n将为 ' + finalPlan.used.length + ' 样食材写入处理记录。\n' + verb)) return false;
           var ack = dietAckFromEvaluation(finalEval);
-          store.applyPlan(finalPlan, undefined, {
-            memberNames: diners.map(function (m) { return m.name; }),
-            diet: { blockers: ackedBlockers.length ? ackedBlockers : ack.blockers, warnings: ackedWarnings.length ? ackedWarnings : ack.warnings }
+          var applyRes = guard(function () {
+            return store.applyPlan(finalPlan, undefined, {
+              memberNames: diners.map(function (m) { return m.name; }),
+              diet: { blockers: ackedBlockers.length ? ackedBlockers : ack.blockers, warnings: ackedWarnings.length ? ackedWarnings : ack.warnings }
+            });
           });
+          if (!applyRes.ok) return false; // 保存失败：冲突解决弹层关闭与否由失败提示弹层接管
           toast('已记录方案处理结果');
           renderAll();
           return true;
@@ -1227,7 +1329,8 @@
     }
     var verb = { cook: '确认已做熟并记录？', discard: '确认丢弃以上食材？', freeze: '确认已分装放入冷冻？', reheat: '确认已彻底复热？' }[p.type] || '确认执行？';
     if (!confirm('「' + p.title + '」\n将为 ' + p.used.length + ' 样食材写入处理记录。\n' + verb)) return;
-    store.applyPlan(p);
+    var applyRes = guard(function () { return store.applyPlan(p); });
+    if (!applyRes.ok) return;
     toast('已记录方案处理结果');
     renderAll();
   }
@@ -1371,6 +1474,10 @@
         toast('已添加成员：' + name);
       }
     } catch (err) {
+      if (FreshStorage.StorageWriteError && FreshStorage.StorageWriteError.is(err)) {
+        showStorageFull(err);  // 弹层保持、输入保留
+        return;
+      }
       toast(err.message || '保存失败');
       return;
     }
@@ -1769,7 +1876,8 @@
         warnings: (ackWarnings && ackWarnings.length) ? ackWarnings : ack.warnings
       };
     }
-    store.addMealPlan(fields, source);
+    var createRes = guard(function () { return store.addMealPlan(fields, source); });
+    if (!createRes.ok) return false; // 保存失败：冲突弹层保留，失败提示已弹出
     state.mealPresetSource = null;
     state.mealPresetIds = null;
     closeSheet('sheetMealPlan');
@@ -1888,7 +1996,8 @@
         var plan = store.getMealPlan(b.getAttribute('data-meal-del'));
         if (!plan) return;
         if (!confirm('删除用餐计划「' + plan.name + '」？（不会改动食材库存）')) return;
-        store.removeMealPlan(plan.id);
+        var mpDel = guard(function () { return store.removeMealPlan(plan.id); });
+        if (!mpDel.ok) return;
         toast('已删除用餐计划');
         renderAll();
       });
@@ -1955,7 +2064,8 @@
     var actions = state.mealDoneActions;
     var nDiscard = Object.keys(actions).filter(function (k) { return actions[k] === 'discard'; }).length;
     if (nDiscard && !confirm('包含 ' + nDiscard + ' 样「丢弃」记录，确认完成？')) return;
-    store.completeMealPlan(planId, actions);
+    var doneRes = guard(function () { return store.completeMealPlan(planId, actions); });
+    if (!doneRes.ok) return;
     state.mealDonePlanId = null;
     state.mealDoneActions = {};
     closeSheet('sheetMealDone');
@@ -1985,6 +2095,7 @@
     'member.add': ['添加家庭成员', 'a-shop', '🧑'],
     'member.update': ['修改成员饮食信息', 'a-shop', '✏️'],
     'member.remove': ['删除家庭成员', 'a-remove', '🧹'],
+    'history.prune': ['清理历史痕迹', 'a-update', '🧹'],
     'data.import': ['导入数据', 'a-update', '⬆️']
   };
   function renderAudit() {
@@ -2025,6 +2136,11 @@
       }
       if (e.action === 'shopping.release') lines.push('取消认领（原负责人：' + esc(d.from || '—') + '），回到待认领');
       if (e.action === 'shopping.add' && d.status === 'unclaimed') lines.push('状态：待认领');
+      if (e.action === 'history.prune') {
+        lines.push('删除旧操作流水 ' + (d.droppedAudit || 0) + ' 条、字段修改快照 ' +
+          (d.revisionsDropped || 0) + ' 份（库存与期限事件未删除；保留最近 ' +
+          (d.keepAudit || 500) + ' 条流水）');
+      }
       if (d.itemId && e.action === 'shopping.complete') {
         var linked = store.getItem(d.itemId);
         lines.push(linked ? '已关联新库存：' + esc(linked.name) : '关联库存已删除');
@@ -2074,7 +2190,8 @@
 
     $$('#auditList [data-restore]').forEach(function (b) {
       b.addEventListener('click', function () {
-        store.restoreItem(b.getAttribute('data-restore'));
+        var r = guard(function () { return store.restoreItem(b.getAttribute('data-restore')); });
+        if (!r.ok) return;
         toast('已恢复该记录');
         renderAll();
       });
@@ -2099,8 +2216,9 @@
     $('#btnExport').addEventListener('click', function () { $('#sheetSettings').hidden = false; });
     $('#btnDemo').addEventListener('click', function () {
       if (store.listItems().length && !confirm('载入演示数据会追加到现有库存，继续？')) return;
-      var n = store.seedDemo(null, FreshEngine);
-      toast('已载入 ' + n + ' 样演示食材');
+      var r = guard(function () { return store.seedDemo(null, FreshEngine); });
+      if (!r.ok) return;
+      toast('已载入 ' + r.value + ' 样演示食材');
       closeSheet('sheetSettings');
       renderAll();
     });
@@ -2120,12 +2238,30 @@
           closeSheet('sheetSettings');
           renderAll();
         } catch (e) {
+          // 容量写满：存储层已回滚，现有库存不变；引导先导出/清理
+          if (FreshStorage.StorageWriteError && FreshStorage.StorageWriteError.is(e)) {
+            showStorageFull(e);
+            return;
+          }
           // 结构不合法时导入被整体取消、现有库存不变；向用户说明具体原因
           alert('未能导入，现有库存没有任何改动。\n\n' + (e.message || '文件内容无法解析'));
         }
       };
       r.readAsText(f);
       ev.target.value = '';
+    });
+    $('#btnPrune').addEventListener('click', function () {
+      var info = store.storageInfo();
+      if (!confirm('将删除较早的操作流水（保留最近 500 条）和每样食材较早的字段修改快照。\n\n' +
+        '库存、待购、用餐计划、家庭成员、期限事件与撤销记录都不会删除，食材仍可在追溯中恢复。\n\n' +
+        '当前数据约 ' + humanBytes(info.totalBytes) + '，其中操作流水约 ' +
+        humanBytes(info.parts.audit) + '。建议先导出备份再清理。现在开始？')) return;
+      var r = guard(function () { return store.pruneHistory({ keepAudit: 500, keepRevisions: 20 }); });
+      if (!r.ok) return;
+      var s = r.value;
+      toast('已清理：删除 ' + s.droppedAudit + ' 条旧流水、' + s.revisionsDropped +
+        ' 份旧快照，腾出约 ' + humanBytes(Math.max(s.bytesSaved, 0)), 3600);
+      renderAll();
     });
     $('#btnWipe').addEventListener('click', function () {
       if (!confirm('确定清空本机全部数据（食材 / 补货 / 用餐计划 / 家庭成员 / 追溯 / 家庭称呼）？此操作不可恢复。')) return;
@@ -2189,7 +2325,8 @@
     $('#btnDeleteItem').addEventListener('click', function () {
       if (!state.editingId) return;
       if (!confirm('删除该食材记录？记录会软删除并保留在追溯中（可恢复）。')) return;
-      store.removeItem(state.editingId);
+      var delItem = guard(function () { return store.removeItem(state.editingId); });
+      if (!delItem.ok) return;
       closeSheet('sheetForm');
       toast('已删除，可在追溯中恢复');
       renderAll();
@@ -2264,7 +2401,8 @@
       var m = id ? store.getMember(id) : null;
       if (!m) return;
       if (!confirm('删除成员「' + m.name + '」？\n历史用餐计划会保留其姓名快照，不再参与新的冲突检查。')) return;
-      store.removeMember(id);
+      var delMb = guard(function () { return store.removeMember(id); });
+      if (!delMb.ok) return;
       state.editingMemberId = null;
       closeSheet('sheetMemberForm');
       toast('已删除成员');
@@ -2294,6 +2432,16 @@
 
     setupOCR();
     setupSettings();
+    setupStorageAlert();
+    // 兜底：任何漏网的存储写入异常（事件处理器里直接抛出）都要让用户看见，
+    // 绝不允许“界面毫无反应、用户以为已保存”
+    window.addEventListener('error', function (ev) {
+      var err = ev && ev.error;
+      if (err && FreshStorage.StorageWriteError && FreshStorage.StorageWriteError.is(err)) {
+        ev.preventDefault();
+        showStorageFull(err);
+      }
+    });
     // 方案页默认带上次选择的就餐成员（成员可能已删除，渲染时再过滤）
     state.planDinerIds = getSavedDiners().slice();
     renderAll();

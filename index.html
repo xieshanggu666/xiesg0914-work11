@@ -90,7 +90,8 @@
   <section class="view" id="view-history" hidden>
     <div class="history-head">
       <h2>操作与变更记录</h2>
-      <p class="hint">所有修改、期限事件、方案应用都会记录在此，可逐条撤销，不会物理删除。</p>
+      <p class="hint">所有修改、期限事件、方案应用都会记录在此，可逐条撤销，不会物理删除。
+        记录过多导致存储写满时，可在 ⚙️ 设置里「清理历史痕迹」瘦身（只删旧流水与旧快照，不删库存）。</p>
     </div>
     <div id="auditList" class="audit-list"></div>
   </section>
@@ -389,9 +390,35 @@
       <button class="setting-row" id="btnExport2">⬇️ 导出全部数据（JSON）</button>
       <button class="setting-row" id="btnImport">⬆️ 从 JSON 文件导入（合并）</button>
       <input type="file" id="importInput" accept="application/json" hidden>
+      <button class="setting-row" id="btnPrune">🧹 清理历史痕迹（瘦身，不删库存）</button>
       <button class="setting-row danger" id="btnWipe">🗑️ 清空全部数据</button>
     </div>
     <div class="form-actions"><button class="btn-ghost" data-close>关闭</button></div>
+  </div>
+</div>
+
+<!-- ========== 存储写满/保存失败提示弹层（不自动消失） ========== -->
+<div class="sheet sheet-alert" id="sheetStorageFull" hidden>
+  <div class="sheet-mask"></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3>⚠️ 保存失败：本机存储空间已满</h3>
+    <p class="hint" id="storageFullMsg">
+      刚才的修改<b>没有存进浏览器</b>，请先处理后再重试，否则刷新或关闭页面后这条记录会丢失。
+    </p>
+    <div class="storage-stats" id="storageStats"></div>
+    <p class="hint">建议按顺序处理：</p>
+    <ol class="storage-steps">
+      <li><b>先导出备份</b>：把全部数据存成 JSON 文件，放到手机/电脑上，数据就安全了；</li>
+      <li><b>清理历史痕迹</b>：只删除较早的操作流水与字段修改快照（库存、待购、计划、成员和期限事件都不会删），
+        通常足以腾出空间；</li>
+      <li>若清理后仍无法保存，请导出备份后在 ⚙️ 中「清空全部数据」，再把备份导回。</li>
+    </ol>
+    <div class="form-actions">
+      <button type="button" class="btn-ghost" id="btnStorageClose">我知道了</button>
+      <button type="button" class="btn-ghost" id="btnStoragePrune">🧹 清理历史痕迹</button>
+      <button type="button" class="btn-primary" id="btnStorageExport">⬇️ 先导出备份</button>
+    </div>
   </div>
 </div>
 
