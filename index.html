@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#1e8e4f">
+<title>鲜知 FreshKeeper · 家庭食材保质期助手</title>
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="logo">🥬</span>
+    <div>
+      <h1>鲜知</h1>
+      <p class="subtitle" id="summaryLine">正在加载库存…</p>
+    </div>
+  </div>
+  <button class="icon-btn" id="btnExport" title="导出/导入/演示数据">⚙️</button>
+</header>
+
+<main id="views">
+
+  <!-- ========== 库存视图 ========== -->
+  <section class="view" id="view-inventory">
+    <div class="filter-bar" id="statusFilter">
+      <button class="chip active" data-f="all">全部</button>
+      <button class="chip danger" data-f="expired">已过期</button>
+      <button class="chip warn" data-f="urgent">尽快/临期</button>
+      <button class="chip fresh" data-f="fresh">新鲜</button>
+      <button class="chip muted" data-f="frozen">冷冻中</button>
+      <button class="chip muted" data-f="ended">已归档</button>
+    </div>
+    <div id="inventoryList" class="card-list"></div>
+    <p class="empty-hint" id="inventoryEmpty" hidden>还没有食材。点下方 <b>＋</b> 录入，或在 ⚙️ 里载入演示数据。</p>
+  </section>
+
+  <!-- ========== 补货视图 ========== -->
+  <section class="view" id="view-shopping" hidden>
+    <div class="shop-head">
+      <h2>补货清单 🛒</h2>
+      <p class="hint">家庭共享采购：待认领项谁顺路谁认领，也可以转交给其他成员；点「已买到」会打开录入表单，
+        <b>保存成功后</b>才会标记已购买并关联新库存，取消录入则继续保留。</p>
+      <div class="shop-identity" id="shopIdentity" role="button" tabindex="0"></div>
+      <button class="btn-primary shop-add-btn" id="btnAddShopping">＋ 手动添加待购食材</button>
+    </div>
+    <div class="filter-bar" id="shopFilter">
+      <button class="chip active" data-f="open">待办</button>
+      <button class="chip muted" data-f="unclaimed">待认领</button>
+      <button class="chip muted" data-f="claimed">已认领</button>
+      <button class="chip muted" data-f="done">已买到</button>
+    </div>
+    <div id="shoppingList" class="shop-list"></div>
+    <p class="empty-hint" id="shoppingEmpty" hidden>还没有待购食材。吃完或丢弃食材后可在详情里一键补货，也可以点上方按钮手动添加。</p>
+  </section>
+
+  <!-- ========== 用餐计划视图 ========== -->
+  <section class="view" id="view-mealplan" hidden>
+    <div class="shop-head">
+      <h2>用餐计划 🍽️</h2>
+      <p class="hint">从库存挑选食材安排到某一天：创建时会按<b>计划日的预计状态</b>提示调整（临期/过期/需解冻）；
+        完成后逐样记录做熟、吃完或丢弃，期限与追溯自动更新。</p>
+      <button class="btn-primary shop-add-btn" id="btnAddMealPlan">＋ 新建用餐计划</button>
+    </div>
+    <div class="filter-bar" id="mealFilter">
+      <button class="chip active" data-f="pending">待用餐</button>
+      <button class="chip muted" data-f="done">已完成</button>
+    </div>
+    <div id="mealPlanList" class="shop-list"></div>
+    <p class="empty-hint" id="mealPlanEmpty" hidden>还没有用餐计划。点上方「新建用餐计划」从库存挑选食材，
+      或在「方案」页把某个做法一键加入计划。</p>
+  </section>
+
+  <!-- ========== 方案视图 ========== -->
+  <section class="view" id="view-plan" hidden>
+    <div class="plan-head">
+      <h2>用现有库存，先处理最该处理的</h2>
+      <p class="hint">方案只使用当前库存；每个方案都会注明用了什么、做完后还剩什么需要尽快处理。</p>
+      <div class="diner-bar" id="planDiners"></div>
+      <div class="select-bar">
+        <span class="hint">也可以只勾选几样食材让系统组合：</span>
+        <div id="quickPick" class="quick-pick"></div>
+      </div>
+    </div>
+    <div id="planList" class="plan-list"></div>
+  </section>
+
+  <!-- ========== 追溯视图 ========== -->
+  <section class="view" id="view-history" hidden>
+    <div class="history-head">
+      <h2>操作与变更记录</h2>
+      <p class="hint">所有修改、期限事件、方案应用都会记录在此，可逐条撤销，不会物理删除。</p>
+    </div>
+    <div id="auditList" class="audit-list"></div>
+  </section>
+
+</main>
+
+<!-- 底部录入按钮 + 导航 -->
+<nav class="tabbar">
+  <button class="tab active" data-view="inventory"><span>🧺</span>库存</button>
+  <button class="tab" data-view="shopping"><span>🛒</span>补货<em class="tab-badge" id="shopBadge" hidden>0</em></button>
+  <button class="tab tab-add" id="btnAdd"><span>＋</span><label>录入</label></button>
+  <button class="tab" data-view="mealplan"><span>🍽️</span>计划<em class="tab-badge" id="mealBadge" hidden>0</em></button>
+  <button class="tab" data-view="plan"><span>🍳</span>方案</button>
+  <button class="tab" data-view="history"><span>🕓</span>追溯</button>
+</nav>
+
+<!-- ========== 录入/编辑弹层 ========== -->
+<div class="sheet" id="sheetForm" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="formTitle">录入食材</h3>
+
+    <div class="ocr-zone" id="ocrZone">
+      <button type="button" class="ocr-btn" id="btnCamera">📷 拍照识别包装标签</button>
+      <button type="button" class="ocr-btn ghost" id="btnPhoto">🖼️ 从相册选择</button>
+      <input type="file" id="fileInput" accept="image/*" hidden>
+      <p class="hint" id="ocrStatus">识别后会把文字填进表单，<b>请你逐项确认再保存</b>；识别结果不会自动入库。</p>
+    </div>
+
+    <form id="itemForm">
+      <div class="restock-hint" id="restockHint" hidden>
+        🛒 正在为待购项「<b id="restockHintName"></b>」录入购买信息。保存成功后该待购项才会完成并关联这条新库存；
+        点取消则待购项继续保留。
+      </div>
+      <label class="field">
+        <span>食材名称 <em>*</em></span>
+        <input type="text" id="fName" required maxlength="30" placeholder="如：猪里脊 / 菠菜 / 酸奶" autocomplete="off">
+        <small class="cat-hint" id="catHint"></small>
+      </label>
+
+      <label class="field">
+        <span>食材分类（识别不准时可手改）</span>
+        <select id="fCategory"></select>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span>购买日期 <em>*</em></span>
+          <input type="date" id="fPurchaseDate" required>
+        </label>
+        <label class="field">
+          <span>包装状态</span>
+          <select id="fPackage">
+            <option value="sealed">未开封 / 密封</option>
+            <option value="opened">已开封</option>
+            <option value="loose">散装（称重/无包装）</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="field">
+        <span>保存位置</span>
+        <div class="seg" id="fLocation">
+          <button type="button" data-v="fridge" class="active">🧊 冷藏</button>
+          <button type="button" data-v="freezer">❄️ 冷冻</button>
+          <button type="button" data-v="pantry">🏠 常温</button>
+        </div>
+      </label>
+
+      <label class="field">
+        <span>备注（可选）</span>
+        <input type="text" id="fNote" maxlength="60" placeholder="如：已分两盒 / 周三剩菜">
+      </label>
+
+      <div class="rule-preview" id="rulePreview"></div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" id="btnDeleteItem" hidden>删除记录</button>
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 添加/编辑待购弹层 ========== -->
+<div class="sheet" id="sheetShopping" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="shopFormTitle">添加待购食材</h3>
+
+    <form id="shoppingForm">
+      <label class="field">
+        <span>食材名称 <em>*</em></span>
+        <input type="text" id="sName" required maxlength="30" placeholder="如：猪里脊 / 菠菜 / 酸奶" autocomplete="off">
+        <small class="cat-hint" id="sCatHint"></small>
+      </label>
+
+      <label class="field">
+        <span>食材分类（识别不准时可手改）</span>
+        <select id="sCategory"></select>
+      </label>
+
+      <div class="field-row">
+        <label class="field">
+          <span>购买数量</span>
+          <input type="text" id="sQty" maxlength="30" placeholder="如：2 斤 / 1 盒 / 3 个">
+        </label>
+        <label class="field">
+          <span>负责人（可选）</span>
+          <input type="text" id="sAssignee" maxlength="20" list="shopMembers" placeholder="留空=待认领" autocomplete="off">
+          <datalist id="shopMembers"></datalist>
+        </label>
+      </div>
+
+      <label class="field">
+        <span>备注（可选）</span>
+        <input type="text" id="sNote" maxlength="60" placeholder="如：选小棵的 / 给宝宝做辅食">
+      </label>
+
+      <div class="dup-warn" id="sDupWarn" hidden></div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary" id="sSubmit">加入待购</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 认领 / 转交负责人弹层 ========== -->
+<div class="sheet" id="sheetAssign" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="assignTitle">认领待购项</h3>
+    <p class="hint" id="assignHint"></p>
+    <form id="assignForm">
+      <label class="field">
+        <span id="assignNameLabel">负责人名字 <em>*</em></span>
+        <input type="text" id="assignName" maxlength="20" list="shopMembers2" placeholder="如：妈妈 / 爸爸 / 我" autocomplete="off">
+        <datalist id="shopMembers2"></datalist>
+      </label>
+      <div id="assignMembers" class="assign-members"></div>
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary" id="assignSubmit">确认</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 家庭成员管理弹层 ========== -->
+<div class="sheet" id="sheetMembers" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3>家庭成员与饮食偏好</h3>
+    <p class="hint">为每位成员记录<b>过敏食材</b>、<b>忌口/不喜欢</b>和<b>偏好</b>。
+      创建方案或用餐计划时选择就餐成员，系统会对所选食材给出明确冲突提示。</p>
+    <div id="memberList" class="member-list"></div>
+    <div class="form-actions">
+      <button type="button" class="btn-primary" id="btnAddMember" style="flex:1">＋ 添加成员</button>
+      <button type="button" class="btn-ghost" data-close>关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 添加/编辑成员弹层 ========== -->
+<div class="sheet" id="sheetMemberForm" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="memberFormTitle">添加家庭成员</h3>
+    <form id="memberForm">
+      <label class="field">
+        <span>姓名 <em>*</em></span>
+        <input type="text" id="mbName" required maxlength="20" placeholder="如：爸爸 / 妈妈 / 宝宝" autocomplete="off">
+      </label>
+      <div id="mbDietGroups"></div>
+      <label class="field">
+        <span>备注（可选）</span>
+        <input type="text" id="mbNote" maxlength="60" placeholder="如：孕期忌口 / 对花生严重过敏">
+      </label>
+      <div class="form-actions">
+        <button type="button" class="btn-ghost danger" id="btnDeleteMember" hidden>删除成员</button>
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary">保存</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 饮食冲突解决弹层（方案应用 / 用餐计划创建） ========== -->
+<div class="sheet" id="sheetDiet" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="dietTitle">饮食冲突提示</h3>
+    <p class="hint" id="dietIntro"></p>
+    <div id="dietRows"></div>
+    <div id="dietCandidates" class="diet-candidates" hidden></div>
+    <label class="dup-confirm diet-ack" id="dietAckBox" hidden>
+      <input type="checkbox" id="dietAck"> <span id="dietAckLabel"></span>
+    </label>
+    <div class="form-actions">
+      <button type="button" class="btn-ghost" data-close>取消</button>
+      <button type="button" class="btn-primary" id="btnDietContinue">确认并继续</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 食材详情/时间线弹层 ========== -->
+<div class="sheet" id="sheetDetail" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <div id="detailBody"></div>
+  </div>
+</div>
+
+<!-- ========== 方案详情弹层 ========== -->
+<div class="sheet" id="sheetPlan" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <div id="planDetailBody"></div>
+  </div>
+</div>
+
+<!-- ========== 新建用餐计划弹层 ========== -->
+<div class="sheet" id="sheetMealPlan" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="mealFormTitle">新建用餐计划</h3>
+
+    <form id="mealPlanForm">
+      <label class="field">
+        <span>计划名称 <em>*</em></span>
+        <input type="text" id="mName" required maxlength="30" placeholder="如：周五晚餐 / 周末火锅" autocomplete="off">
+      </label>
+
+      <label class="field">
+        <span>用餐日期 <em>*</em></span>
+        <input type="date" id="mDate" required>
+      </label>
+
+      <div class="field">
+        <span>就餐成员（按成员过敏/忌口检查食材）</span>
+        <div id="mDinerBar" class="diner-bar in-form"></div>
+      </div>
+
+      <div class="field">
+        <span>选择食材（来自库存，按处理紧迫度排序）</span>
+        <div id="mPickList" class="meal-pick-list"></div>
+      </div>
+
+      <div class="meal-preview" id="mPreview"></div>
+
+      <div class="form-actions">
+        <button type="button" class="btn-ghost" data-close>取消</button>
+        <button type="submit" class="btn-primary" id="mSubmit">确认计划</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- ========== 完成用餐计划弹层 ========== -->
+<div class="sheet" id="sheetMealDone" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3 id="mealDoneTitle">完成用餐计划</h3>
+    <p class="hint">为每样食材记录处理结果——沿用库存的期限事件（做熟/吃完/丢弃），
+      保存后期限立即重算并写入追溯；已在别处归档的食材会自动跳过。</p>
+    <div id="mealDoneList"></div>
+    <div class="form-actions">
+      <button type="button" class="btn-ghost" data-close>取消</button>
+      <button type="button" class="btn-primary" id="btnMealDoneConfirm">确认完成</button>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 设置弹层 ========== -->
+<div class="sheet" id="sheetSettings" hidden>
+  <div class="sheet-mask" data-close></div>
+  <div class="sheet-panel">
+    <div class="sheet-handle"></div>
+    <h3>数据与设置</h3>
+    <p class="hint">所有数据只保存在本设备浏览器（localStorage），不上传服务器。</p>
+    <div class="settings-list">
+      <button class="setting-row" id="btnDemo">🧪 载入演示数据</button>
+      <button class="setting-row" id="btnExport2">⬇️ 导出全部数据（JSON）</button>
+      <button class="setting-row" id="btnImport">⬆️ 从 JSON 文件导入（合并）</button>
+      <input type="file" id="importInput" accept="application/json" hidden>
+      <button class="setting-row danger" id="btnWipe">🗑️ 清空全部数据</button>
+    </div>
+    <div class="form-actions"><button class="btn-ghost" data-close>关闭</button></div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="js/rules.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/diet.js"></script>
+<script src="js/planner.js"></script>
+<script src="js/storage.js"></script>
+<script src="js/ocr.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
